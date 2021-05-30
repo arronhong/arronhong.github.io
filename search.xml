@@ -1,0 +1,407 @@
+<?xml version="1.0" encoding="utf-8"?>
+<search>
+  <entry>
+    <title>HTTP Request Smuggling</title>
+    <url>/2021/05/22/HTTP%20Request%20Smuggling/</url>
+    <content><![CDATA[<h1>HTTP Request Smuggling</h1>
+<p>現今的Web應用程式架構通常由frontend server(load balancer)將http request轉給backend server，且front-end server與backend server間會使用persistent connection來減少反覆建立tcp開銷(3 way handshake、slow start)。HTTP smuggling透過frontend server與backend server對http body長度判斷依據不同，將干擾的資訊prepend在下個request達成攻擊。</p>
+<p><img src="https://i.imgur.com/oNHq051.png" alt=""></p>
+<h2 id="HTTP1-x-判斷message-body的方式">HTTP1.x 判斷message body的方式</h2>
+<h3 id="Content-Length">Content-Length</h3>
+<p>當client與server用同一個tcp連線來傳送多個http request時，要如何知道http的結尾？透過Content-Length header來聲明message body的長度</p>
+<figure class="highlight plaintext"><table><tr><td class="code"><pre><span class="line">POST /search HTTP/1.1</span><br><span class="line">Host: normal-website.com</span><br><span class="line">Content-Type: application/x-www-form-urlencoded</span><br><span class="line">Content-Length: 11</span><br><span class="line"></span><br><span class="line">q=smuggling</span><br></pre></td></tr></table></figure>
+<h3 id="Transfer-Encoding">Transfer-Encoding</h3>
+<p>因為header必須要送到，因此當app要動態的產生message body而沒辦法預先知道message body長度時就沒辦法用Content-Length。Transfer-Encoding header聲明message body會透過將message切成多個chunks傳送，每個chunk的開頭是chunk size(十六進制表示)接著CRLF，再接著chunk content，收到chunk size 0時表示message body結束</p>
+<figure class="highlight plaintext"><table><tr><td class="code"><pre><span class="line">POST /search HTTP/1.1</span><br><span class="line">Host: normal-website.com</span><br><span class="line">Content-Type: application/x-www-form-urlencoded</span><br><span class="line">Transfer-Encoding: chunked</span><br><span class="line"></span><br><span class="line">b</span><br><span class="line">q=smuggling</span><br><span class="line">0</span><br></pre></td></tr></table></figure>
+<h2 id="如何執行HTTP-smuggling">如何執行HTTP smuggling</h2>
+<p>雖然rfc有規範當同時出現Content-Length與Transfer-Encoding時，應該要採用Transfer-Encoding，但現實世界卻不一定會是這樣，像是有些server不支援TE。而當request同時帶有CL與TE且frontend server與backend server對body邊界的認定不同時，就可能產生弱點</p>
+<h3 id="CL-TE-vulnerabilities">CL.TE vulnerabilities</h3>
+<p>frontend server看CL，backend server看TE</p>
+<figure class="highlight plaintext"><table><tr><td class="code"><pre><span class="line">POST / HTTP/1.1</span><br><span class="line">Host: vulnerable-website.com</span><br><span class="line">Content-Type: application/x-www-form-urlencoded</span><br><span class="line">Content-Length: 6</span><br><span class="line">Transfer-Encoding: chunked</span><br><span class="line"></span><br><span class="line">0</span><br><span class="line"></span><br><span class="line">G</span><br></pre></td></tr></table></figure>
+<p>frontend server因為看CL，所以會把整包轉給backend server，但backend server看TE，因此只讀到chunk size 0就認為這次request結束並回response，而剩下的message(<code>G</code>)，backend server會認為是下個http request而先buffer住直到剩下的header到</p>
+<p>下個request就會像是以下範例，因不認得GPOST這個method而得到錯誤</p>
+<figure class="highlight plaintext"><table><tr><td class="code"><pre><span class="line">GPOST / HTTP/1.1</span><br><span class="line">Host: vulnerable-website.com</span><br><span class="line">Content-Type: application/x-www-form-urlencoded</span><br></pre></td></tr></table></figure>
+<h3 id="TE-CL-vulnerabilities"><a href="http://TE.CL">TE.CL</a> vulnerabilities</h3>
+<p>frontend server看TE，backend server看CL</p>
+<figure class="highlight plaintext"><table><tr><td class="code"><pre><span class="line">POST / HTTP/1.1</span><br><span class="line">Host: vulnerable-website.com</span><br><span class="line">Content-Type: application/x-www-form-urlencoded</span><br><span class="line">Content-length: 4</span><br><span class="line">Transfer-Encoding: chunked</span><br><span class="line"></span><br><span class="line">5c</span><br><span class="line">GPOST / HTTP/1.1</span><br><span class="line">Content-Type: application/x-www-form-urlencoded</span><br><span class="line">Content-Length: 15</span><br><span class="line"></span><br><span class="line">x=1</span><br><span class="line">0</span><br></pre></td></tr></table></figure>
+<p>frontend server因為看TE，所以會把整包轉給backend server，但backend server看CL，因此只讀到第一行(5c跟CRLF共4個bytes)就認為這次request結束並回response，而剩下的message，backend server會認為是下個http request而先buffer住直到剩下的header到</p>
+<p>下個request就會像是以下範例，因不認得GPOST這個method而得到錯誤</p>
+<figure class="highlight plaintext"><table><tr><td class="code"><pre><span class="line">GPOST / HTTP/1.1</span><br><span class="line">Content-Type: application/x-www-form-urlencoded</span><br><span class="line">Content-Length: 15</span><br><span class="line"></span><br><span class="line">x=1</span><br><span class="line">0POST / HTTP/1.1</span><br><span class="line">Host: vulnerable-website.com</span><br><span class="line">Content-Type: application/x-www-form-urlencoded</span><br><span class="line">Content-length: 4</span><br><span class="line">Transfer-Encoding: chunked</span><br></pre></td></tr></table></figure>
+<h3 id="TE-TE-behavior-obfuscating-the-TE-header">TE.TE behavior: obfuscating the TE header</h3>
+<p>frontend server與backend server都支援處理TE，藉由帶入錯誤的TE來混淆，而frontend server與backend server對混淆的TE處理方式不同時，像是其中一個server被混淆而去看CL時，就形成上述的兩種情況之一</p>
+<figure class="highlight plaintext"><table><tr><td class="code"><pre><span class="line">POST / HTTP/1.1</span><br><span class="line">Host: your-lab-id.web-security-academy.net</span><br><span class="line">Content-Type: application/x-www-form-urlencoded</span><br><span class="line">Content-length: 4</span><br><span class="line">Transfer-Encoding: chunked</span><br><span class="line">Transfer-encoding: cow</span><br><span class="line"></span><br><span class="line">5c</span><br><span class="line">GPOST / HTTP/1.1</span><br><span class="line">Content-Type: application/x-www-form-urlencoded</span><br><span class="line">Content-Length: 15</span><br><span class="line"></span><br><span class="line">x=1</span><br></pre></td></tr></table></figure>
+<h2 id="用HTTP-smuggling繞過frontend-server的存取控制">用HTTP smuggling繞過frontend server的存取控制</h2>
+<p>這裡舉個比較真實的例子。有些應用程式會在frontend server做存取控制，像是限制只有有權限的使用者才能存取特定endpoint，frontend server只轉有權限的使用者的request給backend server，backend server則完全信任fronent server bypass後的request，因此backend server不做任何權限驗證</p>
+<p>假設攻擊者只能存取<code>/home</code>而不能存取<code>/admin</code>，攻擊者藉由http smuggling方法，讓frontend server看到兩次存取<code>/home</code>的request，backend server看到一次<code>/home</code>與一次<code>/admin</code>的request，而第二次request繞過frontend server的限制存取受限的資源</p>
+<figure class="highlight plaintext"><table><tr><td class="code"><pre><span class="line">POST /home HTTP/1.1</span><br><span class="line">Host: vulnerable-website.com</span><br><span class="line">Content-Type: application/x-www-form-urlencoded</span><br><span class="line">Content-Length: 62</span><br><span class="line">Transfer-Encoding: chunked</span><br><span class="line"></span><br><span class="line">0</span><br><span class="line"></span><br><span class="line">GET /admin HTTP/1.1</span><br><span class="line">Host: vulnerable-website.com</span><br><span class="line">Foo: xGET /home HTTP/1.1</span><br><span class="line">Host: vulnerable-website.com</span><br></pre></td></tr></table></figure>
+<h2 id="如何避免http-smuggling">如何避免http smuggling</h2>
+<ul>
+<li>backend server不使用persistent connection，因此每個request都是不同的connection</li>
+<li>backend server使用http2，http2使用不同於http1.x的封包格式</li>
+<li>frontend server與backend server使用相同的方式來判定message body的長度</li>
+</ul>
+<h2 id="Reference">Reference</h2>
+<ul>
+<li><a href="https://portswigger.net/web-security/request-smuggling">HTTP request smuggling</a></li>
+<li><a href="https://portswigger.net/web-security/request-smuggling/exploiting">Exploiting HTTP request smuggling vulnerabilities<br>
+</a></li>
+</ul>
+]]></content>
+      <categories>
+        <category>http security</category>
+      </categories>
+      <tags>
+        <tag>http</tag>
+        <tag>security</tag>
+      </tags>
+  </entry>
+  <entry>
+    <title>TCP Backlog</title>
+    <url>/2021/05/17/TCP%20Backlog/</url>
+    <content><![CDATA[<h1>TCP backlog</h1>
+<p>TCP 3 way handshake</p>
+<figure class="highlight plaintext"><table><tr><td class="code"><pre><span class="line">client -&gt; server: syn j</span><br><span class="line">server -&gt; client: syn k, ack j+1</span><br><span class="line">client -&gt; server: ack k+1</span><br></pre></td></tr></table></figure>
+<p>server會維護有兩個queue</p>
+<ul>
+<li>incomplete connection (SYN_RECV) queue</li>
+<li>complete connection (ESTABLISHED) queue</li>
+</ul>
+<p>server收到syn並回覆syn/ack後將connection放到SYN_RECV queue，SYN_RECV queue大小由net.ipv4.tcp_max_syn_backlog控制(net.ipv4.tcp_syncookies 0)。</p>
+<p>當server收到ack之後，將connection從SYN_RECV queue移到ESTABLISHED queue，connection在ESTABLISHED queue被accept後移出。ESTABLISHED queue大小由listen的backlog參數控制，如果backlog小於net.core.somaxconn會用net.core.somaxconn的設定</p>
+<blockquote>
+<p>The behavior of the backlog argument on TCP sockets changed with Linux 2.2. Now it specifies the queue length for completely established sockets waiting to be accepted, instead of the number of incomplete connection requests. The maximum length of the queue for incomplete sockets can be set using /proc/sys/net/ipv4/tcp_max_syn_backlog. When syncookies are enabled there is no logical maximum length and this setting is ignored. See tcp(7) for more information.</p>
+</blockquote>
+<blockquote>
+<p>If the backlog argument is greater than the value in /proc/sys/net/core/somaxconn, then it is silently truncated to that value.  Since Linux 5.4, the default in this file is 4096; in earlier kernels, the default value is 128. In kernels before 2.4.25, this limit was a hard coded value, SOMAXCONN, with the value 128.</p>
+</blockquote>
+<p>當ESTABLISHED queue滿了無法將connection從SYN_RECV queue移過來且net.ipv4.tcp_abort_on_overflow 1時，server收到ack會回rst；net.ipve.tcp_abort_on_overflow 0時，會直接丟棄ack，此時從client角度會認為connection被接受並不知道ack被丟棄(connection稱做half-open)，client便直接送data，connection對於server來說還不是ESTABLISHED因此丟棄data。在SYN_RECV queue的connection會有timeout重送syn/ack機制(exponential backoff)，timeout時重送syn/ack直到收到ack並成功將connection移往ESTABLISHED queue或是超過net.ipv4.tcp_synack_retries，超過net.ipv4.tcp_synack_retries server回覆rst。ESTABLISHED queue滿了也會丟棄一定程度的syn即使SYN_RECV queue沒有滿</p>
+<h2 id="Reference">Reference</h2>
+<ul>
+<li><a href="http://veithen.io/2014/01/01/how-tcp-backlog-works-in-linux.html">How TCP backlog works in Linux</a></li>
+<li><a href="https://man7.org/linux/man-pages/man2/listen.2.html">listen(2) — Linux manual page</a></li>
+</ul>
+]]></content>
+      <tags>
+        <tag>tcp</tag>
+      </tags>
+  </entry>
+  <entry>
+    <title>Introduction to Kafka</title>
+    <url>/2021/05/25/Introduction%20to%20Kafka/</url>
+    <content><![CDATA[<h1>Introduction to Kafka</h1>
+<div class="info">
+<p>閱讀Kafka the definitive guide的筆記</p>
+<ul>
+<li>Ch1 Meet Kafka</li>
+<li>Ch2 Installing Kafka</li>
+<li>Ch3 Kafka Producer: Writing Message to Kafka</li>
+<li>CH4 Kafka Consumer: Reading Data from Kafka</li>
+<li>Ch5 Kafka Internals</li>
+<li>Ch6 Relialbe Data Delivery</li>
+</ul>
+</div>
+<h2 id="What-is-Kafka">What is Kafka</h2>
+<p>分散式的event streaming系統。從多個端點獲取資料並將資料持久化存在disk，其他端點依照使用情境real time或是offline讀取並處理資料。Kafka可以在多種情境下使用，像是real time的金融交易系統、網站使用者行為追蹤與分析、sensor等IoT裝置資料運用以及microservices與event driven架構</p>
+<h3 id="Terminology">Terminology</h3>
+<p><img src="https://i.imgur.com/cfgsyS6.png" alt=""></p>
+<h4 id="Message">Message</h4>
+<p>相當於資料庫系統裡的一筆row或record。另外message可以有叫做key的metadata，key可以用來當作寫進哪個partition的參考</p>
+<h4 id="Topic">Topic</h4>
+<p>messages透過topic來分類，相當於資料庫系統裡的table或collection</p>
+<h4 id="Partition">Partition</h4>
+<p>一個topic由一到多個patitions組成，分散儲存在多個kafka brokers上。message以append的方式寫進partition，一個topic內的messages不保證時序，但一個partition內的messages保證。partition的設計與kafka提供的可靠性與可擴展性有很大的關係</p>
+<h4 id="Broker">Broker</h4>
+<p>存放data的server，讓producer(consumer)寫入(讀取)data。多個brokers組成cluster</p>
+<h4 id="Producer">Producer</h4>
+<p>將message送進broker的client</p>
+<h4 id="Consumer">Consumer</h4>
+<p>從broker讀出message的client</p>
+<h4 id="Zookeeper">Zookeeper</h4>
+<p>kafka透過zookeeper管理cluster內的配置，像是cluster內brokers、consumers與topics等的配置</p>
+<h2 id="Producer-2">Producer</h2>
+<h3 id="How-producer-send-message">How producer send message</h3>
+<h4 id="Send-api">Send api</h4>
+<ol>
+<li>呼叫producer send api，並帶入topic、value以及optional key參數</li>
+<li>把value跟key serialize成bytes</li>
+<li>根據key決定partition或自定義partitioning的方法</li>
+<li>將message壓縮並append到buffer</li>
+<li>把message callback加到callback list</li>
+<li>send api return，後續將message送到broker的工作由internal sender thread處理</li>
+</ol>
+<p><img src="https://i.imgur.com/KMvbnLN.png" alt=""></p>
+<h4 id="Sender-thread">Sender thread</h4>
+<ol>
+<li>sender thread poll batch queues，每個batch queue拿一個batch(batch由多筆messages組成)</li>
+<li>根據batch要送到哪個broker分組</li>
+<li>將batch送到broker</li>
+<li>如果有用pipelining，sender不會等broker回應就繼續送下一個batch</li>
+<li>取得response後依序呼叫callback</li>
+</ol>
+<p><img src="https://i.imgur.com/tlEygcu.png" alt=""></p>
+<h4 id="When-batch-is-ready">When batch is ready</h4>
+<ul>
+<li>batch size到達設定大小</li>
+<li>超過收集的時間(linger time)</li>
+<li>另一個要送到相同broker的batch已經ready</li>
+<li>call flush或close</li>
+</ul>
+<h3 id="Producer-configuration">Producer configuration</h3>
+<h4 id="acks">acks</h4>
+<p>acks控制broker必須在message同步到多少replicas才能回response</p>
+<table>
+<thead>
+<tr>
+<th>acks</th>
+<th>throughput</th>
+<th>latency</th>
+<th>durability</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td>0</td>
+<td>high</td>
+<td>low</td>
+<td>no guarantee</td>
+</tr>
+<tr>
+<td>1</td>
+<td>medium</td>
+<td>medium</td>
+<td>leader</td>
+</tr>
+<tr>
+<td>all</td>
+<td>low</td>
+<td>high</td>
+<td>ISR</td>
+</tr>
+</tbody>
+</table>
+<ul>
+<li>ack 0，基本上網路沒問題，producer送出訊息後不會管broker有沒有回response，基本上不保證data durability，有很高的throughput</li>
+<li>ack 1，等到partition leader將message寫到local</li>
+<li>ack all，等到所有in sync replica都將message寫進去</li>
+</ul>
+<h4 id="buffer-memory">buffer.memory</h4>
+<p>producer buffer size，設置合理的buffer siez以避免當producer將messages送到buffer的速度比送到broker的速度還快，導致run out of memory。當buffer滿的時候，producer等待max.block.ms時間，否則拋出例外</p>
+<h4 id="compression-type">compression.type</h4>
+<p>messages壓縮的方式，將message壓縮是提升performance的重要設定之一，壓縮可以降低network utilization及storage(kafka會將壓縮後的messages直接存在disk，之後也會直接整包送給consumer)。不同的壓縮方式有不同的壓縮比以及cpu運算時間，根據cpu等級與network bandwidth決定壓縮方式</p>
+<h4 id="request-timeout-ms"><a href="http://request.timeout.ms">request.timeout.ms</a></h4>
+<p>控制producer最多等待broker回應produce request的時間</p>
+<h4 id="metadata-fetch-timeout-ms"><a href="http://metadata.fetch.timeout.ms">metadata.fetch.timeout.ms</a></h4>
+<p>控制producer最多等待broker回應metadata request的時間</p>
+<h4 id="max-request-size">max.request.size</h4>
+<p>控制一個request的最大size</p>
+<h4 id="batch-size">batch.size</h4>
+<p>batch可佔用memory最大size。batch size較大會佔用較多的buffer，反之較小會導致較頻繁的發送request</p>
+<h4 id="linger-ms"><a href="http://linger.ms">linger.ms</a></h4>
+<p>控制sender thread必須要等多久時間才能將batch送出。較高的linger time會有較好的throughput，反之有較高的latency</p>
+<h4 id="retries">retries</h4>
+<p>當producer收到可重試的錯誤時，最多自動重試的次數</p>
+<ul>
+<li>retriable error : connection error、no leader</li>
+<li>non-retriable error : message too large、serialization error、authorized error</li>
+</ul>
+<p>與retry.backoff.ms一起調整適當的值避免producer太快放棄或是浪費太多資源在重試</p>
+<h4 id="max-in-flight-requests-per-connection">max.in.flight.requests.per.connection</h4>
+<p>在同一個connection下，可以pipelining多少個request。如果設定retries並且有pipeline，可能會導致messages的順序改變(e.q. 兩個batches pipeline送到broker，第一個batch fail並且重試，第二個成功後第一個batch重試成功)</p>
+<h3 id="Sending-strategy">Sending strategy</h3>
+<p>send api是async讓sender thread把message送到broker，根據use case，應用程式通常會有以下方式使用send</p>
+<h4 id="Synchronous-send">Synchronous send</h4>
+<p>呼叫完send之後，application需等到broker回應成功或失敗，並根據回應處理後續邏輯</p>
+<h4 id="Fire-and-forget">Fire and forget</h4>
+<p>不在乎message成功或失敗，送完之後直接準備下一個message。要注意的是，如果有設定retries，遇到retriable error，sender thread還是會自動重試，因此message失敗表示遇到non-retriable error或retry exhausted</p>
+<h4 id="Asynchronous-send">Asynchronous send</h4>
+<p>持續地送訊息，當broker回應時才去呼叫先前註冊的callback，並在callback處理成功或失敗後續動作(log、metric)</p>
+<h3 id="Partitioner">Partitioner</h3>
+<p>預設是將message的key hash並根據該topic的partition數量來決定partition。只要partition數量不變，就可以保證相同的key會是相同的partition，而當partition數量改變，相同key的新message有可能會是不同的partition。如果沒有給key，預設會用round robin的方式選擇partition</p>
+<p>當某個key的message數量遠大於其他key，可能會導致特定broker的空間與loading過重，這時可以自訂partitioning的策略(有些driver不支援自訂partitioning)，像是把數量很大的kay寫到有較大儲存空間的partition，其他key平均在其他partitions</p>
+<h2 id="Consumer-2">Consumer</h2>
+<h3 id="Consumer-group">Consumer group</h3>
+<p>一組consumers共同合作處理一些topics，也就是一組consumers分擔多個partitions的loading。透過增減member的數量來拓展處理messages的能力，因此topic擁有數量較多的partitions，在scale上較有彈性</p>
+<p>一個partition只會被同一group內的一個member consume，因此member的數量超過partition的數量時，就會有consumer會閒置</p>
+<p><img src="https://i.imgur.com/AMPMDQV.png" alt=""></p>
+<h3 id="Consumer-Protocol">Consumer Protocol</h3>
+<h4 id="Startup">Startup</h4>
+<p>consumer起來時先問broker使用的api version，接著透過metadata request詢問cluster information(e.q. broker address、partition數量以及partition leader等)。在broker端會有一個group coordinator(一個broker，不同的group會有不同的broker)，coordinator負責處理consumer heartbeat、指派group leader以及consumer加入離開等事務。consumer接著會尋找coordinator並送JoinGroup reuqest給coordinator要求加入group，第一個加入group的consumer成為group leader，group leader會從coordinator得知group中所有members的資訊(資訊存在zookeeper)，group leader負責分配partitions並將名單送給coordinator，接著members詢問coordinator得知自己的assignment</p>
+<p><img src="https://i.imgur.com/eFQn39y.png" alt=""></p>
+<h4 id="Consumption">Consumption</h4>
+<p>consumer開始拉取message時要先知道要從哪裡開始，可以透過fetch offset request得知該partition上次處理到哪個offset，fetch offset request不是必要的，只要consumer已經知道offset，那只要在fetch request時可以聲明即可，隨著fetch request不停地拉取messages，consumer還必須適時的向broker更新offset以及向coordinator發送heartbeat</p>
+<p><img src="https://i.imgur.com/kH20fYm.png" alt=""></p>
+<h4 id="Shutdown">Shutdown</h4>
+<p>consumer發送leave group request以gracefully shutdown</p>
+<p><img src="https://i.imgur.com/pFagoix.png" alt=""></p>
+<h3 id="Poll-loop">Poll loop</h3>
+<p>consumer poll api封裝大部分的動作，包含partition rebalance、送heatbeat及data fetching，這樣的設計讓application只要處理資料就好。consumer必須要在一定的時間內送出heartbeat，否則會被認為not alive，因此處理資料的時間必需短於session timeout的時間</p>
+<p>poll api回傳messages，每筆message包含key、value、partition、offset和topic。poll可以設定參數，控制block多久時間來等待consumer buffer裡有資料，時間長短端看application想要多快拿回控制</p>
+<h3 id="Rebalance">Rebalance</h3>
+<p>某些情況發生時，consumer group內的partitions需要重新分配，好讓每個partition都有被處理以及盡可能地平均分配</p>
+<ul>
+<li>consumer加入group</li>
+<li>consumer離開group</li>
+<li>topic有新增partition</li>
+<li>broker failure，該broker leader partition轉讓</li>
+</ul>
+<p>consumer會定時送heartbeat給coordinator，當coordinator一段時間沒收到heartbeat時便認定consumer已經退出group，因此觸發rebalance。在執行rebalance的期間，整個group不會consume message。在coordinator尚未發現consumer已經退出(e.q. consumer crash)的這段時間，會使partition的messages暫停被consume，直到heartbeat session timeout。consumer明確地告知group coordinator退出，可使group coordinator立即觸發rebalance以便降低無法處理partition的gap</p>
+<h4 id="Rebalance-listeners">Rebalance listeners</h4>
+<p>在rebalance的前後，可以註冊callback來做一些處理，像是在rebalance前，commit你已經處理好的message等</p>
+<ul>
+<li>
+<p>onPartitionsRevoked<br>
+rebalance開始前，consumers都停止comsume後。這裡可以讓application commit先前還沒commit的offset</p>
+</li>
+<li>
+<p>onPartitionsAssigned<br>
+partition重新分配後，consumer開始consume前</p>
+</li>
+</ul>
+<h3 id="Consumer-configuration">Consumer configuration</h3>
+<h4 id="fetch-min-bytes">fetch.min.bytes</h4>
+<p>控制broker最小回傳messages的size，如果可取得的messages size不夠，broker會block直到size夠才回傳。可以提高fetch.min.bytes來降低RTT，並且在consumer數量很多的時候可以降低brokers的loading</p>
+<h4 id="fetch-max-wait-ms"><a href="http://fetch.max.wait.ms">fetch.max.wait.ms</a></h4>
+<p>當messages size不足fetch.min.bytes的要求時，broker最多block多久就要回應request</p>
+<h4 id="max-partition-fetch-bytes">max.partition.fetch.bytes</h4>
+<p>每個partition每次回傳給consumer的最大size，避免run out of consumer memory。需注意設置太大時，可能使data processing的時間過久，而無法在session timeout之前送heartbeat</p>
+<p>這個設置是per partition的，因此要跟consumer總共處理partitions數量一起計算是否超過consumer memory。假設有20個partitions、5個consumers且max.partition.fetch.bytes是1MB，則每個consumer就需要大於4MB的可用memory。但實際上會需要更多的memory，因為group裡的consumer可能會離開</p>
+<h4 id="heartbeat-interval-ms"><a href="http://heartbeat.interval.ms">heartbeat.interval.ms</a></h4>
+<p>多久送heartbeats，通常與session.timeout.ms一起調整</p>
+<h4 id="session-timeout-ms"><a href="http://session.timeout.ms">session.timeout.ms</a></h4>
+<p>heartbeats有效時間，較低的timeout時間可以快速地偵測不預期退出的consumer，但也較容易誤判造成rebalance。反之較高的timeout會使恢復partition consume的gap較大，但也較不易誤判造成rebalance</p>
+<h4 id="auto-offset-reset">auto.offset.reset</h4>
+<p>當consumer提供的offset不合法(offset已經被刪除或者offset不存在)時，要從哪裡(latest or earliest)開始consume</p>
+<h4 id="enable-auto-commit">enable.auto.commit</h4>
+<p>當設為true時，會根據auto.commit.interval.ms時間自動commit offset</p>
+<h3 id="Commits-and-offsets">Commits and offsets</h3>
+<p>當發生rebalance或group restart時，consumer可能會被指派不同的partition，透過追蹤partition offset，讓consumer可以接續partition上次的消費進度</p>
+<p>consumer透過produce特殊的__consumer_offsets topic(0.9 and above)，將offset記錄在broker上的方式來追蹤每個group對partitions的處理進度</p>
+<p>發生rebalance時，最近commit的offset比正在處理的offset還小時，會造成message重複處理。發生rebalance時，最近commit的offset比正在處理的offset還大時，會造成data lose</p>
+<p><img src="https://i.imgur.com/cWrIOGA.png" alt=""></p>
+<h4 id="Commit-strategy">Commit strategy</h4>
+<h5 id="Automatic-commit">Automatic commit</h5>
+<p>application不用處理commit，commit會在poll api裡自動處理。當呼叫poll時，會去檢查是否超過上次commit加上auto.commit.interval.ms的時間，是的話就commit上一次poll的最大offset</p>
+<h4 id="Synchronous-commit">Synchronous commit</h4>
+<p>application自己掌控commit時機並等到commit response才做後續處理。commitSync api會等到broker回應response。commit失敗的時候會自動retry。頻繁的commit會降低throughput，反之會增加duplicate message的機會</p>
+<h4 id="Asynchronous-commit">Asynchronous commit</h4>
+<p>application自己掌控commit時機，但不需要立刻知道commit結果。commitAsync api不等broker response，而是用callback的方式等到broker回應後才處理commit結果。commitAsync失敗後不會自動retry，因為自動retry可能會造成問題(e.q.假設一開始commit offset 2000時遇到短暫的connection問題，而隨後的offset 3000 commit成功了，這時offset 2000要retry並且成功就可能會把offset commit較小的位置)。如果想要在callback裡處理retry，就要注意commit順序的問題</p>
+<h2 id="Kafka-Internal">Kafka Internal</h2>
+<h3 id="Zookeeper-2">Zookeeper</h3>
+<p>kafka用zookeeper來管理cluster，zookeeper會存放broker狀態、controller、topic及partition等。當broker啟動後會透過在zookeeper上建立ephemeral node的方式將自己的id註冊，當broker與zookeeper斷線時ephemeral node就會被移除，因此有新的broker加入或是移除時，透過監測這些ephemeral node的變化得知broker狀態</p>
+<p>zookeeper存放cluster的結構</p>
+<figure class="highlight plaintext"><table><tr><td class="code"><pre><span class="line">/</span><br><span class="line">|--brokers</span><br><span class="line">|    |--topics/[topic]/partitions/[partitionId]/state</span><br><span class="line">|    |--ids/[brokerId]</span><br><span class="line">|</span><br><span class="line">|--controller_epoch</span><br><span class="line">|--controller</span><br><span class="line">|--consumers</span><br><span class="line">|    |--[groupId]</span><br><span class="line">|         |--ids/[consumerId]</span><br><span class="line">|         |--owners/[topic]/[partitionId]</span><br><span class="line">|</span><br><span class="line">|--config</span><br><span class="line">|    |--topics/[topic_name]</span><br><span class="line">|    |--clients/[topic_name]</span><br><span class="line">|</span><br><span class="line">|--isr_change_notification</span><br><span class="line">|--admin</span><br><span class="line">     |--delete_topics/[topic_to_be_deleted] </span><br><span class="line">     |--preferred_replica_election</span><br></pre></td></tr></table></figure>
+<h3 id="Controller">Controller</h3>
+<p>cluster中的一個broker會被選為controller，controller要負責指派partition leaders，以及監控其他brokers是否failure。當controller得知有broker離開時，要將該broker的partition leadership指派給其他broker(通常是replica list的下一個replica)，然後通知所有brokers，誰是新的leader</p>
+<p>第一個在zookeeper建立controller node的broker會成為controller，其他嘗試建立controller node的brokers會收到node exist的例外，接著其他brokers透過watch controller node的得知controller的變化。當controller離開cluster，controller node會被刪掉，其他brokers知到後嘗試去建立controller node成為controller，沒成為controller的brokers，會重新watch controller node</p>
+<h3 id="Replication">Replication</h3>
+<p>partition replication是kafka提供availability以及durability的方式。每個partition只有一個leader叫做leader replica，所有producers與consumers都對leader發送request。其他的replicas叫做follower replicas，followers負責從leader replicate messages，當leader離開cluster，其中之一個follower會被選為leader。followers會對leader發送fetch request，request裡包含想要的offset，所以leader會知道所有followers同步到哪，如果follower超過replica.lag.time.max.ms時間沒有fetch，或是在該時間無法同步到最新的offset，就會被認為out of sync，out of sync的followers無法被選為leader，反之能在時間內同步到最新offset的replica稱為ISR(in sync replica)</p>
+<h4 id="Preferred-leader">Preferred leader</h4>
+<p>preferred leader是一開始topic被建立起來時，該topic所有partitions的leader配置，preferred leader會是下一個被選為leader的首選，因為最一開始的leader配置會是將partition leader最平均分在所有brokers的配置，因此期望preferred leader就是leader的狀況來達到負載均衡。當auto.leader.rebalance.enable=true時，preferred leader不是leader並且preferred leader處在in sync狀態時，會重新觸發leader election讓preferred leader成為leader</p>
+<h4 id="Partition-allocation">Partition allocation</h4>
+<p>建立topic時，kafka會在brokers間分配partitions，並且有以下目標</p>
+<ul>
+<li>讓partitions在brokers間平均分散</li>
+<li>讓partition以及每個replica在不同的broker上</li>
+<li>如果有rack awareness，會盡量將partition與每個replica分散在不同的rack</li>
+</ul>
+<p>分配partition到brokers的時候，不是用broker disk可存放空間來考量，而是partitions的數量。選擇好要將partition存在哪個broker之後，便要決定把partition寫到哪個目錄(log.dirs)，kafka會去計算每個目錄裡partitions的數量，並把新的partition存在數量最少的目錄，而不是考慮disk usage</p>
+<h3 id="Request-processing">Request processing</h3>
+<p>produce與fetch request都必須送到partition leader，否則收到not leader error。kafka client會透過metadata request得知topic、partition、leader等資訊。所有的brokers都會把metadata存在cache，因此client可以問任何一個broker，client問完後也會存在cache</p>
+<h4 id="Produce-request">Produce request</h4>
+<p>當leader收到produce request時，會驗證</p>
+<ul>
+<li>user對這個topic有沒有權限</li>
+<li>acks參數是否正確</li>
+<li>如果acks是all，是否有足夠的ISR可以同步。(當ISR的數量低於min.insync.replicas，broker會拒絕produce request)</li>
+</ul>
+<p>如果沒有問題，leader就會寫進local disk(寫進filesystem cache，因此不保證何時寫進disk，kafka是以replica的方式做durability)，寫進disk後，leader會根據acks的設定回應，如果acks=all，等到所有followers都同步之後才回應</p>
+<h4 id="Fetch-request">Fetch request</h4>
+<p>fetch request要求topics的partitions的offsets之後的messages。leader會檢查offset是否合法並存在，如果沒問題會用zero copy的方式從filesystem cache直接將messages送到network。client還可以控制broker回傳的資料量的上限(max.partition.fetch.bytes)與最小的資料量(fetch.min.bytes)，以及如果資料量未達最小限制broker可以收集多久(<a href="http://fetch.max.wait.ms">fetch.max.wait.ms</a>)</p>
+<p><img src="https://i.imgur.com/fUbeKD9.png" alt=""></p>
+<p>consumer只會取得已經同步到所有ISR的messages(high watermark)。leader會知道replicas同步狀況。這也表示replicas同步messages的速度會影響到consumers取的messages的速度(<a href="http://xn--replica-1w3lt67clt1dszfr99d.lag.time.max.ms">設定合理的replica.lag.time.max.ms</a>)，因此為了提高reliability增加replica factor也會影響到throughput</p>
+<p><img src="https://i.imgur.com/eTDdfvh.png" alt=""></p>
+<h4 id="Other-requests">Other requests</h4>
+<p>除了metadata、produce、fetch requests之外，還有其他種類request，像是當partition有新leader時，controller發送LeaderAndIsr request通知所有brokers。request種類會持續增加或改進，在舊版本的protocol中，consumers透過zookeeper追蹤offsets，後來則是改成用特殊的topic來儲存追蹤offsets(OffsetCommitRequest、OffsetFetchRequest、ListOffsetsRequest)</p>
+<p>client使用的request版本不能比broker支援的版本還新。較新的broker版本都可以向前相容舊版本的request</p>
+<h3 id="File-management">File management</h3>
+<p>kafka最小儲存單位是partition，partition不能跨brokers，甚至不能跨disks(multiple disks if RAID is configured)。partition會被分成segments，每個segment大小根據size(log.segment.bytes)或是時間(<a href="http://log.segment.ms">log.segment.ms</a>)決定，當kafka寫檔案時發現到達限制時，就會將segment關閉並開始新的segment。正在寫入的segment叫做active segment，active segment不會被刪除</p>
+<h4 id="Log-retention">Log retention</h4>
+<p>設定log.retention.ms控制log保存多久，實際上會去看segment的last modified time(mtime)，正常來說mtime會是segment關閉的時間。另一種用log.retention.bytes限制partition保存最大size。如果兩個同時設定的話，就看哪個先達成條件。另外log.segment.bytes的大小會影響log retention的時間，log.segment.bytes越大會使segment越晚關閉，越晚關閉表示時間計算越晚開始</p>
+<h4 id="File-format">File format</h4>
+<p>每個file(segment)裡包含messages與其offsets，格式就跟producer送上來的一樣，也跟consumer讀出的時候一樣，透過這樣的規範讓kafka可以使用zero copy也避免對訊息解壓縮後再壓縮來提高效率。每個message包含key、 value、offset、message size、checksum、version、壓縮方式以及timestamp。如果producer將所有messages壓縮一筆message，這筆message會被放在value的欄位，之後broker會將這筆message直接送給consumer，consumer收到後解壓縮就會拿到所有messages</p>
+<p><img src="https://i.imgur.com/poFSDZV.png" alt=""></p>
+<h4 id="Index">Index</h4>
+<p>consumer會要求任何合法的offset，而這個offset可能存在任何segments中，因此kafka建立index segment將offset對應到log segment中的位置。segment file是由裡面最小的offset命名。index segment每筆record是由4 bytes的相對base offset以及4 bytes位置組成。當要找特定offset時，透過檔案名稱可以快速知道要去哪個index segment找，然後透過index segment內排序好的內容用binary sort快速找到該offset在log segment中的position</p>
+<p><img src="https://i.imgur.com/I0BkKOn.png" alt=""><br>
+<img src="https://i.imgur.com/uJhCBk5.png" alt=""></p>
+<h3 id="Log-compaction">Log compaction</h3>
+<p>log compaction提供另一種retention的方式，不將segment刪掉，而是把segment裡的logs壓起來，替每個key保留最新的value</p>
+<p><img src="https://i.imgur.com/6TrUs3S.png" alt=""></p>
+<p>如何compact</p>
+<ol>
+<li>segment分成clean與dirty兩個部分，clean是指先前已經compact過的部分，dirty則是尚未compact過的</li>
+<li>kafka在開始時會啟動cleaner thread</li>
+<li>cleaner會選擇dirty messages比例最高的partition開始處理</li>
+<li>cleaner iterate dirty messages的部分建立OffsetMap，這個map將key hash成16 bytes的值對應到8 bytes的offset，key相同就保留最大的offset</li>
+<li>cleaner建立新的segment並從頭開始掃，如果key符合最新的offset或是key不在map裡就將message寫到新的segment</li>
+<li>最後將新的segment替換舊的</li>
+</ol>
+<h2 id="Reliable-Data-Delivery">Reliable Data Delivery</h2>
+<p>在建立可靠的系統時，必須先暸解kafka提供哪些guarantees，以及在哪些錯誤情況下會有怎樣的行為。kafka保證</p>
+<ul>
+<li>partition內messages的順序</li>
+<li>consumer只會讀到committed的message(committed message表示message同步到ISR。producer透過ack=all得知是否committed)</li>
+</ul>
+<p>replication是kafka提供reliability的核心，replication factor控制replica的數量，控制可靠性與可用性的等級，相對的增加disk成本以及降低throughput</p>
+<h3 id="Unclean-leader-election">Unclean leader election</h3>
+<p>unclean leader election表示允許讓out of sync replica選為leader，允許unclean leader可能導致data lose或data inconsistent，舉例來說，當ISR followers都crash或是同步太慢而只剩下leader時，因為ISR只有leader，此時寫入的messages都會被認定為committed，因此consumer就能讀到，然後leader crash且其中一個follower被選為leader並開始接受produce request，舊的leader回來發現offset與自己的不一致，會把自己不一致的部分刪掉，最後造成data lose與data inconsistent。可以設定(unclean.leader.election.enable)不允許unclean leader，但當發生ISR最後的leader離開時，partition變成offline直到原本的leader回來，如此保證資料一致並且沒有data lose，partition offline導致unavailability</p>
+<h3 id="Minimum-in-sync-replicas">Minimum in-sync replicas</h3>
+<p>committed message表示message已經寫進多少ISR，即使ISR只有leader，這樣就容易造成上述問題。設定min.insync.replica控制必須有多少ISR才能寫入，因此只要ISR小於這個設定，producer就無法寫入訊息(NotEnoughReplicasException)，剩下的ISR變成read only</p>
+<h3 id="Producer-3">Producer</h3>
+<p>acks=1且不允許unclean leader，當leader收到寫進local並回ack後就crash，follower還是in-sync(要認定out of sync需要時間)所以被選成leader，這筆message就會遺失，但不會inconsistent，因為consumer不會讀到</p>
+<p>acks=all且不允許unclean leader，當發生retriable error時，producer沒適當的處理retry(像是沒處理或者還沒retry成功crash後沒保存下來等)也可能發生data lose</p>
+<p>設定min.insync.replica結合，producer可以確保message寫進多少replicas</p>
+<p>retry可能導致duplicate message，例如messages成功寫入ISR，但因為網路斷線producer沒收到ack所以retry(at least once)。常見的解法是用idempotent write或是用unique identifier</p>
+<h3 id="Consumer-3">Consumer</h3>
+<p>consumer在reliability方面就是處理commit offset的問題，如同先前提到的，在commit offset與process message間的rebalance或crash都可能造成duplicate data或是data lose，因此要做到exactly once必須用其他方法，像是將操作設計成idempotent</p>
+<p>commit的頻率必須在效能與message重複的數量之間做取捨，commit的overhead與produce ack=all相似</p>
+<p>有時在poll之後，messages沒辦法立刻處理完畢需要retry(像是DB短暫的無法連線)，此時或許可以先commit這次poll的last offset，把無法處理的messages存在buffer後繼續嘗試處理這些messages，但記得還是要呼叫poll來送heartbeat，因此使用pause確保poll不會拉出額外的messages，buffer清空後再使用resume繼續處理loop；另一個可能的方法是，將這些messages produce到另一個topic並且繼續下個loop，這時可以用另一組consumer group處理這些topic，或是同一組group同時處理兩個topic</p>
+<h3 id="Validating-system-reliability">Validating system reliability</h3>
+<p>開發系統的時候，我們會有需求像是能花多少錢、用什麼等級的硬體、預期服務多少使用者、能接受的回應時間及能接受的容錯等等，而我們也需要知道外部系統提供什麼樣的保證以及什麼樣的限制，根據這些情境來配置外部系統的configuration，接下來會需要驗證配置是否符合需求。kafka definitive guide建議三個階段來驗證系統1. 驗證配置 2. 驗證應用端 3. 在production上監控</p>
+<h4 id="Validating-configuration">Validating configuration</h4>
+<p>將application的logic抽離，單純驗證client與broker的configuration。將kafka提供的VerifiableProducer設定成預想的producer configuration及produce rate，同樣地設定VerifiableConsumer，如此透過VerifiableProducer與VerifiableConsume的print得知結果是否符合需求。另外還建議跑一些狀況(kafka提供的<a href="https://github.com/apache/kafka/tree/trunk/tests">tests</a>)，像是Leader election、Controller election、Rolling restart、Unclean leader election等，當這些情況發生時，系統回復正常的時間是否能接受？是否掉messages？可以接受產生多少duplicate messages</p>
+<h4 id="Validating-Applications">Validating Applications</h4>
+<p>加入application logic跑整合測試，一樣試著跑像上述提到的failure conditions</p>
+<h4 id="Monitoring-Reliability-in-Production">Monitoring Reliability in Production</h4>
+<p>系統上線後，會需要監控client是否正常。監控producer兩個指標1. error rate以及retry rate，另外還需要監看log message是否有狀況(e.q. log是否很長報retry用完)；監控consumer lag指標，consumer lag表示consumer目前的offset離最新message有多遠，如果consmuer持續落後或是越來越遠就需要調整(<a href="https://github.com/linkedin/Burrow">linkedin提供的consumer lag check tool</a>)</p>
+<p>為了監測message從produce到consume是否符合需求上的即時，會需要紀錄produce messages數量、consume messages數量以及message從produce到被consume花了多少時間(version 0.10.0 message format就有timestamp，沒有的話建議produce時加上，並且建議加上一些metadata像是哪裡produce等方邊追蹤除錯)</p>
+<h3 id="Choosing-the-number-of-partitions-for-a-topic">Choosing the number of partitions for a topic</h3>
+<p>partition是kafka平行處理訊息的單位，partition數量影響系統throughdput，我們透過可以期望的throughput來粗淺地計算partition需要的數量</p>
+<ol>
+<li>topic期望的throughput (TT)</li>
+<li>一個producer可以承受的throughput (TP)</li>
+<li>一個consumer可以承受的throughput (TC)</li>
+<li>需要多少producer (NP = TT/TP)</li>
+<li>需要多少consumer (NC = TT/TC)</li>
+<li>partitions = max(NP, NC)</li>
+</ol>
+<p>假設期望topic可以有1GB/sec的read，而一個consumer的能力是50MB/sec，因此最少需要20個consumers，就會是20個partitions；而假設希望topic可以有1GB/sec的write，而一個producer的能力是100MB/sec，因此最少需要10個producers及10個partitions。因此當有20個partitions時就能符合期望的throughput。</p>
+<p>partition的數量雖然可以後來再增加，但partition數量改變後，相同的key就可能不會再被寫入原先的partition，因此這個key的order就無法保證。一個常見的實現是，一開始根據未來期望的throughput來建立partitions，以現在的throughput來建立broker，等到throughput上升擴展broker後，將部分partitions轉移到新的broker。</p>
+<p>較多的partition，也表示kafka會開啟較多的file descriptor，確保作業系統fd limit的設定。</p>
+<h2 id="Reference">Reference</h2>
+<ul>
+<li><a href="https://www.confluent.io/resources/kafka-the-definitive-guide/">Kafka the definitive guide</a></li>
+<li><a href="https://www.youtube.com/watch?v=oQe7PpDDdzA">Tuning Kafka for low latency guaranteed messaging – Jiangjie (Becket) Qin (LinkedIn), 6/15/16</a></li>
+<li><a href="https://thehoard.blog/how-kafkas-storage-internals-work-3a29b02e026">How Kafka’s Storage Internals Work</a></li>
+<li><a href="https://docs.cloudera.com/documentation/enterprise/latest/topics/kafka.html">Cloudera - Apache Kafka Guide</a></li>
+<li><a href="https://www.confluent.io/blog/how-choose-number-topics-partitions-kafka-cluster/">How to choose the number of topics/partitions in a Kafka cluster?</a></li>
+</ul>
+]]></content>
+      <categories>
+        <category>kafka</category>
+      </categories>
+      <tags>
+        <tag>kafka</tag>
+      </tags>
+  </entry>
+</search>
